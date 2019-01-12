@@ -37,15 +37,16 @@ import com.avairebot.chat.ConsoleColor;
 import com.avairebot.commands.CategoryHandler;
 import com.avairebot.commands.CommandHandler;
 import com.avairebot.commands.administration.ChangePrefixCommand;
+import com.avairebot.commands.utility.UptimeCommand;
 import com.avairebot.config.Configuration;
 import com.avairebot.config.EnvironmentMacros;
 import com.avairebot.config.EnvironmentOverride;
 import com.avairebot.contracts.ai.Intent;
 import com.avairebot.contracts.commands.Command;
+import com.avairebot.contracts.database.migrations.Migration;
 import com.avairebot.contracts.reflection.Reflectional;
 import com.avairebot.contracts.scheduler.Job;
 import com.avairebot.database.DatabaseManager;
-import com.avairebot.database.migrate.migrations.*;
 import com.avairebot.database.serializer.PlaylistSongSerializer;
 import com.avairebot.database.transformers.PlaylistTransformer;
 import com.avairebot.exceptions.InvalidApplicationEnvironmentException;
@@ -190,36 +191,9 @@ public class AvaIre {
         database = new DatabaseManager(this);
 
         log.info("Registering database table migrations");
-        database.getMigrations().register(
-            new CreateGuildTableMigration(),
-            new CreateGuildTypeTableMigration(),
-            new CreateBlacklistTableMigration(),
-            new CreatePlayerExperiencesTableMigration(),
-            new CreateFeedbackTableMigration(),
-            new CreateMusicPlaylistsTableMigration(),
-            new CreateStatisticsTableMigration(),
-            new CreateShardsTableMigration(),
-            new AddDJLevelToGuildsTableMigration(),
-            new RenamePlaylistSizeColumnToAmountMigration(),
-            new AddModlogToGuildsTableMigration(),
-            new AddLevelRolesToGuildsTableMigration(),
-            new CreateVotesTableMigration(),
-            new AddDefaultVolumeToGuildsTableMigration(),
-            new AddRolesDataToGuildsTableMigration(),
-            new CreateLogTypeTableMigration(),
-            new CreateLogTableMigration(),
-            new ReformatBlacklistTableMigration(),
-            new AddVotePointsToUsersAndGuildsTableMigration(),
-            new AddMusicChannelToGuildsTableMigration(),
-            new AddExpiresInFieldToBlacklistTableMigration(),
-            new AddOptInToVotesTableMigration(),
-            new RecreateFeedbackTableMigration(),
-            new AddMusicMessagesToGuildsTableMigration(),
-            new AddPartnerToGuildsTableMigration(),
-            new AddHierarchyToGuildsTableMigration(),
-            new AddLevelModifierToGuildsTableMigration(),
-            new AddPardonToLogTableMigration()
-        );
+        autoloadPackage(Constants.PACKAGE_MIGRATION_PATH, migration -> {
+            database.getMigrations().register((Migration) migration);
+        }, false);
 
         log.info("Registering default middlewares");
         MiddlewareHandler.initialize(this);
@@ -255,6 +229,7 @@ public class AvaIre {
 
         log.info("Registering commands...");
         if (settings.isMusicOnlyMode()) {
+            CommandHandler.register(new UptimeCommand(this));
             CommandHandler.register(new ChangePrefixCommand(this));
             autoloadPackage(Constants.PACKAGE_COMMAND_PATH + ".help", command -> CommandHandler.register((Command) command));
             autoloadPackage(Constants.PACKAGE_COMMAND_PATH + ".music", command -> CommandHandler.register((Command) command));
@@ -641,7 +616,12 @@ public class AvaIre {
     }
 
     private void autoloadPackage(String path, Consumer<Reflectional> callback) {
+        autoloadPackage(path, callback, true);
+    }
+
+    private void autoloadPackage(String path, Consumer<Reflectional> callback, boolean parseAvaIreInstance) {
         Set<Class<? extends Reflectional>> types = new Reflections(path).getSubTypesOf(Reflectional.class);
+
 
         Class[] arguments = new Class[1];
         arguments[0] = AvaIre.class;
@@ -652,8 +632,12 @@ public class AvaIre {
             }
 
             try {
-                //noinspection JavaReflectionMemberAccess
-                callback.accept(reflectionClass.getDeclaredConstructor(arguments).newInstance(this));
+                if (parseAvaIreInstance) {
+                    //noinspection JavaReflectionMemberAccess
+                    callback.accept(reflectionClass.getDeclaredConstructor(arguments).newInstance(this));
+                } else {
+                    callback.accept(reflectionClass.getDeclaredConstructor().newInstance());
+                }
             } catch (InstantiationException | IllegalAccessException | InvocationTargetException | NoSuchMethodException e) {
                 getLogger().error("Failed to create a new instance of package {}", reflectionClass.getName(), e);
             }

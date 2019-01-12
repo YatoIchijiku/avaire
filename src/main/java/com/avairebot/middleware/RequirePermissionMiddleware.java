@@ -28,11 +28,13 @@ import com.avairebot.middleware.permission.PermissionCheck;
 import com.avairebot.middleware.permission.PermissionCommon;
 import com.avairebot.middleware.permission.PermissionType;
 import com.avairebot.permissions.Permissions;
+import com.avairebot.utilities.RestActionUtil;
 import net.dv8tion.jda.core.Permission;
 import net.dv8tion.jda.core.entities.Message;
 
 import javax.annotation.Nonnull;
 import java.util.Arrays;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 public class RequirePermissionMiddleware extends Middleware {
@@ -84,7 +86,7 @@ public class RequirePermissionMiddleware extends Middleware {
                         .map(Permissions::getPermission)
                         .map(Permission::getName)
                         .collect(Collectors.joining("`, `"))
-                    ).queue();
+                    ).queue(newMessage -> newMessage.delete().queueAfter(45, TimeUnit.SECONDS, null, RestActionUtil.ignore));
 
                 return false;
             });
@@ -97,7 +99,7 @@ public class RequirePermissionMiddleware extends Middleware {
                         .map(Permissions::getPermission)
                         .map(Permission::getName)
                         .collect(Collectors.joining("`, `"))
-                    ).queue();
+                    ).queue(newMessage -> newMessage.delete().queueAfter(45, TimeUnit.SECONDS, null, RestActionUtil.ignore));
 
                 return false;
             });

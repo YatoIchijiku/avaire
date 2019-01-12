@@ -23,12 +23,17 @@ package com.avairebot.handlers.adapter;
 
 import com.avairebot.AppInfo;
 import com.avairebot.AvaIre;
+import com.avairebot.Constants;
 import com.avairebot.commands.CommandContainer;
 import com.avairebot.commands.CommandHandler;
 import com.avairebot.commands.help.HelpCommand;
 import com.avairebot.contracts.handlers.EventAdapter;
+import com.avairebot.database.collection.Collection;
+import com.avairebot.database.collection.DataRow;
 import com.avairebot.database.controllers.GuildController;
 import com.avairebot.database.controllers.PlayerController;
+import com.avairebot.database.controllers.ReactionController;
+import com.avairebot.database.query.QueryBuilder;
 import com.avairebot.database.transformers.ChannelTransformer;
 import com.avairebot.database.transformers.GuildTransformer;
 import com.avairebot.factories.MessageFactory;
@@ -39,22 +44,21 @@ import com.avairebot.shared.DiscordConstants;
 import com.avairebot.utilities.ArrayUtil;
 import com.avairebot.utilities.RestActionUtil;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
-import net.dv8tion.jda.core.entities.Message;
+import net.dv8tion.jda.core.entities.TextChannel;
 import net.dv8tion.jda.core.entities.User;
 import net.dv8tion.jda.core.events.message.MessageReceivedEvent;
+import net.dv8tion.jda.core.events.message.MessageUpdateEvent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.awt.*;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashSet;
-import java.util.Set;
+import java.sql.SQLException;
+import java.util.*;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class MessageEventAdapter extends EventAdapter {
@@ -81,9 +85,6 @@ public class MessageEventAdapter extends EventAdapter {
         "If you like me please vote for AvaIre to help me grow:",
         "https://discordbots.org/bot/avaire/vote"
     ));
-
-    private static Pattern commandRegEx = null;
-    private static int maxCommandTriggerSize = -1;
 
     /**
      * Instantiates the event adapter and sets the avaire class instance.
@@ -260,9 +261,7 @@ public class MessageEventAdapter extends EventAdapter {
                 return new DatabaseEventHolder(null, null);
             }
 
-            GuildTransformer guild = looksLikeCommand(event.getMessage())
-                ? GuildController.fetchGuild(avaire, event.getMessage())
-                : GuildController.fetchGuild(avaire, event.getMessage());
+            GuildTransformer guild = GuildController.fetchGuild(avaire, event.getMessage());
 
             if (guild == null || !guild.isLevels() || event.getAuthor().isBot()) {
                 return new DatabaseEventHolder(guild, null);
@@ -271,32 +270,74 @@ public class MessageEventAdapter extends EventAdapter {
         });
     }
 
-    private boolean looksLikeCommand(Message message) {
-        if (message.getGuild().getMembers().stream().filter(member -> member.getUser().isBot()).count() > 5) {
-            return false;
+    public void onMessageDelete(TextChannel channel, List<String> messageIds) {
+        Collection reactions = ReactionController.fetchReactions(avaire, channel.getGuild());
+        if (reactions == null) {
+            return;
         }
 
-        String content = message.getContentRaw();
-        if (commandRegEx == null) {
-            maxCommandTriggerSize = -1;
-            Set<String> commandTriggers = new HashSet<>();
-            for (CommandContainer container : CommandHandler.getCommands()) {
-                for (String trigger : container.getCommand().getTriggers()) {
-                    if (trigger.length() > maxCommandTriggerSize) {
-                        maxCommandTriggerSize = trigger.length();
-                    }
-                    commandTriggers.add(Matcher.quoteReplacement(trigger));
+        List<String> removedReactionMessageIds = new ArrayList<>();
+        for (DataRow row : reactions) {
+            for (String messageId : messageIds) {
+                if (Objects.equals(row.getString("message_id"), messageId)) {
+                    removedReactionMessageIds.add(messageId);
                 }
             }
-            maxCommandTriggerSize += 4;
-            commandRegEx = Pattern.compile(String.format(
-                "^(\\S){1,3}(%s)$", String.join("|", commandTriggers)),
-                Pattern.CASE_INSENSITIVE
-            );
         }
 
-        return commandRegEx.matcher(
-            content.substring(0, Math.min(maxCommandTriggerSize, content.length()))
-        ).matches();
+        if (removedReactionMessageIds.isEmpty()) {
+            return;
+        }
+
+        QueryBuilder builder = avaire.getDatabase().newQueryBuilder(Constants.REACTION_ROLES_TABLE_NAME);
+        for (String messageId : removedReactionMessageIds) {
+            builder.orWhere("message_id", messageId);
+        }
+
+        try {
+            builder.delete();
+
+            ReactionController.forgetCache(
+                channel.getGuild().getIdLong()
+            );
+        } catch (SQLException e) {
+            log.error("Failed to delete {} reaction messages for the guild with an ID of {}",
+                removedReactionMessageIds.size(), channel.getGuild().getId(), e
+            );
+        }
+    }
+
+    public void onMessageUpdate(MessageUpdateEvent event) {
+        Collection reactions = ReactionController.fetchReactions(avaire, event.getGuild());
+        if (reactions == null) {
+            return;
+        }
+
+        if (reactions.where("message_id", event.getMessage().getId()).isEmpty()) {
+            return;
+        }
+
+        try {
+            String messageContent = event.getMessage().getContentStripped();
+            if (messageContent.trim().length() == 0 && !event.getMessage().getEmbeds().isEmpty()) {
+                messageContent = event.getMessage().getEmbeds().get(0).getDescription();
+            }
+
+            String finalMessageContent = messageContent;
+            avaire.getDatabase().newQueryBuilder(Constants.REACTION_ROLES_TABLE_NAME)
+                .where("guild_id", event.getGuild().getId())
+                .where("message_id", event.getMessage().getId())
+                .update(statement -> {
+                    statement.set("snippet", finalMessageContent.substring(
+                        0, Math.min(finalMessageContent.length(), 64)
+                    ), true);
+                });
+
+            ReactionController.forgetCache(event.getGuild().getIdLong());
+        } catch (SQLException e) {
+            log.error("Failed to update the reaction role message with a message ID of {}, error: {}",
+                event.getMessage().getId(), e.getMessage(), e
+            );
+        }
     }
 }

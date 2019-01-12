@@ -30,6 +30,7 @@ import com.avairebot.database.transformers.GuildTransformer;
 import com.avairebot.database.transformers.PlayerTransformer;
 import com.avairebot.factories.MessageFactory;
 import com.avairebot.language.I18n;
+import com.avairebot.scheduler.ScheduleHandler;
 import com.avairebot.utilities.CacheUtil;
 import com.avairebot.utilities.RandomUtil;
 import com.avairebot.utilities.RoleUtil;
@@ -42,8 +43,10 @@ import net.dv8tion.jda.core.entities.TextChannel;
 import net.dv8tion.jda.core.entities.User;
 import net.dv8tion.jda.core.events.message.MessageReceivedEvent;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -189,9 +192,13 @@ public class LevelManager {
      * @param guild  The guild transformer from the current guild database instance.
      * @param player The player transformer from the current player database instance.
      */
-    public void rewardPlayer(MessageReceivedEvent event, GuildTransformer guild, PlayerTransformer player) {
+    public void rewardPlayer(@Nonnull MessageReceivedEvent event, @Nonnull GuildTransformer guild, @Nonnull PlayerTransformer player) {
+        if (guild.getLevelExemptChannels().contains(event.getChannel().getIdLong())) {
+            return;
+        }
+
         CacheUtil.getUncheckedUnwrapped(cache, asKey(event), () -> {
-            giveExperience(event.getMessage(), guild, player);
+            giveExperience(event.getMessage(), event.getMessage().getAuthor(), guild, player);
             return 0;
         });
     }
@@ -206,12 +213,22 @@ public class LevelManager {
      * @param user    The user that should be given the experience.
      * @param amount  The amount of experience that should be given to the user.
      */
-    public void giveExperience(AvaIre avaire, Message message, User user, int amount) {
+    public void giveExperience(@Nonnull AvaIre avaire, @Nonnull Message message, @Nonnull User user, int amount) {
         if (!message.getChannelType().isGuild()) {
             return;
         }
 
-        giveExperience(message, GuildController.fetchGuild(avaire, message), PlayerController.fetchPlayer(avaire, message, user), amount);
+        GuildTransformer guildTransformer = GuildController.fetchGuild(avaire, message);
+        if (guildTransformer == null) {
+            return;
+        }
+
+        PlayerTransformer playerTransformer = PlayerController.fetchPlayer(avaire, message, user);
+        if (playerTransformer == null) {
+            return;
+        }
+
+        giveExperience(message, user, guildTransformer, playerTransformer, amount);
     }
 
     /**
@@ -220,11 +237,12 @@ public class LevelManager {
      * transformer, storing it temporarily in memory.
      *
      * @param message The guild message event that should be used.
+     * @param user    The user instance used to represent the user in JDA.
      * @param guild   The guild transformer for the guild the player is from.
      * @param player  The player that should be given the experience.
      */
-    public void giveExperience(Message message, GuildTransformer guild, PlayerTransformer player) {
-        giveExperience(message, guild, player, (RandomUtil.getInteger(5) + 10));
+    public void giveExperience(@Nonnull Message message, @Nonnull User user, @Nonnull GuildTransformer guild, @Nonnull PlayerTransformer player) {
+        giveExperience(message, user, guild, player, (RandomUtil.getInteger(5) + 10));
     }
 
     /**
@@ -232,11 +250,12 @@ public class LevelManager {
      * saving it to the transformer, storing it temporarily in memory.
      *
      * @param message The guild message event that should be used.
+     * @param user    The user instance used to represent the user in JDA.
      * @param guild   The guild transformer for the guild the player is from.
      * @param player  The player that should be given the experience.
      * @param amount  The amount of experience that should be given to the player.
      */
-    public void giveExperience(Message message, GuildTransformer guild, PlayerTransformer player, int amount) {
+    public void giveExperience(@Nonnull Message message, @Nonnull User user, @Nonnull GuildTransformer guild, @Nonnull PlayerTransformer player, int amount) {
         long exp = player.getExperience();
         long zxp = getExperienceFromLevel(guild, 0) - 100;
         long lvl = getLevelFromExperience(guild, exp + zxp);
@@ -244,7 +263,7 @@ public class LevelManager {
         player.incrementExperienceBy(amount);
 
         experienceQueue.add(new ExperienceEntity(
-            message.getAuthor().getIdLong(),
+            user.getIdLong(),
             message.getGuild().getIdLong(),
             amount
         ));
@@ -294,38 +313,37 @@ public class LevelManager {
                         return;
                     }
 
-                    boolean reachedUserLevel = false;
-                    List<Role> rolesToRemove = new ArrayList<>();
-                    Role lastGivenRole = null;
 
-                    for (Map.Entry<Integer, String> entry : guild.getLevelRoles().entrySet()) {
-                        if (entry.getKey() >= newLevel) {
-                            reachedUserLevel = true;
+                    List<Integer> levelKeys = new ArrayList<>(guild.getLevelRoles().keySet());
+                    Collections.sort(levelKeys);
+                    Collections.reverse(levelKeys);
+
+                    List<Role> rolesToRemove = new ArrayList<>(roles);
+
+                    for (int roleLevel : levelKeys) {
+                        String roleId = guild.getLevelRoles().get(roleLevel);
+                        if (roleId == null) {
+                            // This should never be hit... Ever, better to be safe than sorry tho.
+                            continue;
                         }
 
-                        if (entry.getKey() == newLevel || !reachedUserLevel) {
-                            Role role = message.getGuild().getRoleById(entry.getValue());
-                            if (role != null) {
-                                lastGivenRole = role;
+                        Role roleToRemove = null;
+                        for (Role role : rolesToRemove) {
+                            if (role.getId().equals(roleId)) {
+                                roleToRemove = role;
                             }
                         }
 
-                        if (entry.getKey() <= newLevel) {
-                            Role role = message.getGuild().getRoleById(entry.getValue());
-                            if (role != null) {
-                                rolesToRemove.add(role);
-                            }
+                        if (roleToRemove != null) {
+                            rolesToRemove.remove(roleToRemove);
+                            break;
                         }
                     }
-
-                    if (lastGivenRole == null || rolesToRemove.isEmpty()) {
-                        return;
-                    }
-
-                    rolesToRemove.remove(lastGivenRole);
 
                     if (!rolesToRemove.isEmpty()) {
-                        message.getGuild().getController().removeRolesFromMember(message.getMember(), rolesToRemove).queue();
+                        ScheduleHandler.getScheduler().schedule(() -> {
+                            message.getGuild().getController().removeRolesFromMember(message.getMember(), rolesToRemove).queue();
+                        }, 500, TimeUnit.MILLISECONDS);
                     }
                 });
             }
@@ -349,7 +367,7 @@ public class LevelManager {
      * @param transformer The transformer that should be matched with the experience eateries.
      * @return A list of experience entities that belongs to the given player transformer.
      */
-    public List<ExperienceEntity> getExperienceEntities(PlayerTransformer transformer) {
+    public List<ExperienceEntity> getExperienceEntities(@Nonnull PlayerTransformer transformer) {
         return experienceQueue.stream()
             .filter(entity -> entity.getUserId() == transformer.getUserId() && entity.getGuildId() == transformer.getGuildId())
             .collect(Collectors.toList());
